@@ -128,7 +128,11 @@ RUN git clone https://github.com/ROCmSoftwarePlatform/torch_migraphx.git && \
 # Install rocm flash attention v2
 RUN git clone https://github.com/ROCm/flash-attention.git flash-attention-v2 && \
     cd flash-attention-v2 && git submodule update --init --recursive && \
-    GPU_ARCHS=$AMDGPU_TARGETS python3 -m pip install -v . && \
+    # pin to 2.7 to avoid compile issues for version 3.0 concerning undefined CK_TILE_BUFFER_RESOURCE_3RD_DWORD \
+    git checkout v2.7.3-cktile && \
+    sed -i "s#versionstr\.decode(\*SUBPROCESS_DECODE_ARGS)\.strip()\.split(\x27\.\x27)#versionstr\.decode(\*SUBPROCESS_DECODE_ARGS)\.strip()\.split(\x27\.\x27)\n            version = re\.sub(\x27git\x27,\x27\x27, version)#g" /usr/local/venv-pytorch/lib/python3.12/site-packages/torch/utils/cpp_extension.py && \
+    sed -i "s#\"gfx942\"\]#\"gfx942\", \"$AMDGPU_TARGETS\"\]#g" setup.py && \
+    FORCE_BUILD=true GPU_ARCHS=$AMDGPU_TARGETS python3 -m pip install -v . && \
     cd .. && \
     bash -c "rm -rf flash-attention-v2 /tmp/* /var/tmp/* /root/* /root/.[^.]*"
 
