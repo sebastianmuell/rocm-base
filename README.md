@@ -20,7 +20,7 @@ docker run -it --rm \
 ## Contributing
 Always welcome.
 
-## Authors and acknowledgment
+## Acknowledgment
 ROCm Team - for maintaining rocm/dev-ubuntu-24.04 on docker hub
 
 ## License

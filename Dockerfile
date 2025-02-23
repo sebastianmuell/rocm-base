@@ -31,8 +31,6 @@ RUN apt-get update -qqy && apt-get dist-upgrade -qqy && apt-get install -qqy \
     git \
     half \
     hip-dev \
-    hip-doc \
-    hip-samples \
     hipblas-dev \
     hipblaslt-dev \
     hipcc \
