@@ -1,5 +1,5 @@
 # Use rocm dev image
-FROM rocm/dev-ubuntu-24.04
+FROM rocm/dev-ubuntu-24.04:6.3.4
 
 # Set env vars
 ENV DEBIAN_FRONTEND=noninteractive
@@ -11,6 +11,7 @@ ENV PATH="/opt/rocm/llvm/bin:/opt/rocm/bin:$PYVENV/bin:$PATH"
 # Set GPU specific env vars, preset RDNA 3.5 gfx1150 / gfx1151
 # adjust as needed, list of GPUs supported by rocblas: https://github.com/ROCm/rocBLAS/blob/develop/library/src/handle.cpp#L81
 ENV PYTORCH_ROCM_ARCH=gfx1151
+ENV GPU_TARGETS=gfx1151
 ENV AMDGPU_TARGETS=gfx1151
 ENV HSA_OVERRIDE_GFX_VERSION=11.5.1
 ENV FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
@@ -108,12 +109,13 @@ RUN apt-get update -qqy && apt-get dist-upgrade -qqy && apt-get install -qqy \
 # Set up venv & pytorch
 RUN mkdir -p $PYVENV && python3 -m venv $PYVENV && echo "/usr/local/venv-pytorch/lib" > /etc/ld.so.conf.d/11-python-venv.conf && ldconfig && \
     python3 -m pip install -U pip wheel setuptools --no-cache-dir && \
-    python3 -m pip install -U ninja transformers onnx asyncio numpy==1.* pybind11[global] tabulate --no-cache-dir && \
+    python3 -m pip install -U ninja transformers onnx asyncio numpy==1.* pybind11[global] tabulate triton --no-cache-dir && \
     # Install nightly pytorch \
-    python3 -m pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm"$(cat /opt/rocm/.info/version-dev | cut -d. -f1-2)" --no-cache-dir && \
-    cp /opt/rocm/lib/rocblas/library/*$AMDGPU_TARGETS* $PYVENV/lib/python3*/site-packages/torch/lib/rocblas/library/ && \
+    python3 -m pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm"$(cat /opt/rocm/.info/version-dev | cut -d. -f1-2)"/ --no-cache-dir \
+        ||  pip3 install --pre torch torchvision torchaudio -f https://repo.radeon.com/rocm/manylinux/rocm-rel-"$(cat /opt/rocm/.info/version-dev | cut -d. -f1-2)"/ --no-cache-dir && \
     # Install onnxruntime-rocm \
     python3 -m pip install onnxruntime-rocm -f https://repo.radeon.com/rocm/manylinux/rocm-rel-"$(cat /opt/rocm/.info/version-dev | cut -d- -f1)"/ --no-cache-dir && \
+    cp /opt/rocm/lib/rocblas/library/*$AMDGPU_TARGETS* $PYVENV/lib/python3*/site-packages/torch/lib/rocblas/library/ && \
     bash -c "rm -rf /tmp/* /var/tmp/* /root/* /root/.[^.]*"
 
 # Install torch_migraphx
@@ -125,9 +127,7 @@ RUN git clone https://github.com/ROCmSoftwarePlatform/torch_migraphx.git && \
 
 # Install rocm flash attention v2
 RUN git clone https://github.com/ROCm/flash-attention.git flash-attention-v2 && \
-    cd flash-attention-v2 && git submodule update --init --recursive && \
-    # pin to 2.7 to avoid compile issues for version 3.0 concerning undefined CK_TILE_BUFFER_RESOURCE_3RD_DWORD \
-    git checkout v2.7.3-cktile && \
+    cd flash-attention-v2 && git checkout main_perf && git submodule update --init --recursive && \
     sed -i "s#versionstr\.decode(\*SUBPROCESS_DECODE_ARGS)\.strip()\.split(\x27\.\x27)#versionstr\.decode(\*SUBPROCESS_DECODE_ARGS)\.strip()\.split(\x27\.\x27)\n            version = re\.sub(\x27git\x27,\x27\x27, version)#g" /usr/local/venv-pytorch/lib/python3.12/site-packages/torch/utils/cpp_extension.py && \
     sed -i "s#\"gfx942\"\]#\"gfx942\", \"$AMDGPU_TARGETS\"\]#g" setup.py && \
     FORCE_BUILD=true GPU_ARCHS=$AMDGPU_TARGETS python3 -m pip install -v . && \
