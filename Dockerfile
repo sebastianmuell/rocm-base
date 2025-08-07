@@ -1,5 +1,5 @@
 # Use rocm dev image
-FROM rocm/dev-ubuntu-24.04:6.3.4
+FROM rocm/dev-ubuntu-24.04:latest
 
 # Set env vars
 ENV DEBIAN_FRONTEND=noninteractive
@@ -10,9 +10,7 @@ ENV PATH="/opt/rocm/llvm/bin:/opt/rocm/bin:$PYVENV/bin:$PATH"
 
 # Set GPU specific env vars, preset RDNA 3.5 gfx1150 / gfx1151
 # adjust as needed, list of GPUs supported by rocblas: https://github.com/ROCm/rocBLAS/blob/develop/library/src/handle.cpp#L81
-ENV PYTORCH_ROCM_ARCH=gfx1151
-ENV GPU_TARGETS=gfx1151
-ENV AMDGPU_TARGETS=gfx1151
+ENV ROCM_ARCH=gfx1151
 ENV HSA_OVERRIDE_GFX_VERSION=11.5.1
 ENV FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
 ENV TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1
@@ -27,9 +25,10 @@ RUN apt-get update -qqy && apt-get dist-upgrade -qqy && apt-get install -qqy \
     bzip2 \
     ca-certificates \
     cmake \
-    espeak-ng \
+    cmake-curses-gui \
     ffmpeg \
     git \
+    golang \
     half \
     hip-dev \
     hipblas-dev \
@@ -47,12 +46,15 @@ RUN apt-get update -qqy && apt-get dist-upgrade -qqy && apt-get install -qqy \
     libboost-system-dev \
     libboost-filesystem-dev \
     libglib2.0-0 \
+    libjpeg-dev \
     libomp-dev \
     libopenblas-dev \
     libopenmpi-dev \
+    libpng-dev \
     libprotobuf-dev \
     libsm6 \
     libsndfile1-dev \
+    libtbb-dev \
     libxext6 \
     libxrender1 \
     llvm \
@@ -96,41 +98,37 @@ RUN apt-get update -qqy && apt-get dist-upgrade -qqy && apt-get install -qqy \
     rocwmma-dev \
     rpp \
     rpp-dev \
+    rsync \
     software-properties-common \
     subversion \
     sudo \
-    tesseract-ocr \
     wget \
     && \
     apt-get clean && \
     apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    ln -s /opt/rocm-*/ /opt/rocm && \
+    git config --global user.email "gitlab@gitlab.local" && \
+    git config --global user.name "gitlab bot"
 
 # Set up venv & pytorch
-RUN mkdir -p $PYVENV && python3 -m venv $PYVENV && echo "/usr/local/venv-pytorch/lib" > /etc/ld.so.conf.d/11-python-venv.conf && ldconfig && \
+RUN mkdir -p $PYVENV && python3 -m venv $PYVENV && echo "$PYVENV/lib" > /etc/ld.so.conf.d/11-python-venv.conf && ldconfig && \
     python3 -m pip install -U pip wheel setuptools --no-cache-dir && \
-    python3 -m pip install -U ninja transformers onnx asyncio numpy==1.* pybind11[global] tabulate triton --no-cache-dir && \
+    python3 -m pip install -U asyncio ninja numpy==1.* numba onnx pybind11[global] pytest scipy tabulate transformers triton --no-cache-dir && \
     # Install nightly pytorch \
-    python3 -m pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm"$(cat /opt/rocm/.info/version-dev | cut -d. -f1-2)"/ --no-cache-dir \
-        ||  pip3 install --pre torch torchvision torchaudio -f https://repo.radeon.com/rocm/manylinux/rocm-rel-"$(cat /opt/rocm/.info/version-dev | cut -d. -f1-2)"/ --no-cache-dir && \
+    python3 -m pip install -U --pre torch torchvision torchaudio numpy==1.* --index-url https://download.pytorch.org/whl/nightly/rocm"$(cat /opt/rocm/.info/version-dev | cut -d. -f1-2)"/ --no-cache-dir && \
+    cp -n /opt/rocm/lib/rocblas/library/*$ROCM_ARCH* $PYVENV/lib/python3*/site-packages/torch/lib/rocblas/library/ && \
     # Install onnxruntime-rocm \
-    python3 -m pip install onnxruntime-rocm -f https://repo.radeon.com/rocm/manylinux/rocm-rel-"$(cat /opt/rocm/.info/version-dev | cut -d- -f1)"/ --no-cache-dir && \
-    cp /opt/rocm/lib/rocblas/library/*$AMDGPU_TARGETS* $PYVENV/lib/python3*/site-packages/torch/lib/rocblas/library/ && \
+    python3 -m pip install -U onnxruntime-rocm triton numpy==1.* -f https://repo.radeon.com/rocm/manylinux/rocm-rel-"$(cat /opt/rocm/.info/version-dev | cut -d- -f1)"/ --no-cache-dir \
+    || python3 -m pip install -U onnxruntime-rocm triton numpy==1.* -f https://repo.radeon.com/rocm/manylinux/rocm-rel-"$(cat /opt/rocm/.info/version-dev | cut -d. -f1-2)"/ --no-cache-dir && \
     bash -c "rm -rf /tmp/* /var/tmp/* /root/* /root/.[^.]*"
-
-# Install torch_migraphx
-RUN git clone https://github.com/ROCmSoftwarePlatform/torch_migraphx.git && \
-    cd ./torch_migraphx/py && \
-    TORCH_CMAKE_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')" python3 -m pip install -v . && \
-    cd ../../ && \
-    bash -c "rm -rf torch_migraphx/ /tmp/* /var/tmp/* /root/* /root/.[^.]*"
 
 # Install rocm flash attention v2
 RUN git clone https://github.com/ROCm/flash-attention.git flash-attention-v2 && \
     cd flash-attention-v2 && git checkout main_perf && git submodule update --init --recursive && \
     sed -i "s#versionstr\.decode(\*SUBPROCESS_DECODE_ARGS)\.strip()\.split(\x27\.\x27)#versionstr\.decode(\*SUBPROCESS_DECODE_ARGS)\.strip()\.split(\x27\.\x27)\n            version = re\.sub(\x27git\x27,\x27\x27, version)#g" /usr/local/venv-pytorch/lib/python3.12/site-packages/torch/utils/cpp_extension.py && \
-    sed -i "s#\"gfx942\"\]#\"gfx942\", \"$AMDGPU_TARGETS\"\]#g" setup.py && \
-    FORCE_BUILD=true GPU_ARCHS=$AMDGPU_TARGETS python3 -m pip install -v . && \
+    sed -i "s#\"gfx942\"\]#\"gfx942\", \"$ROCM_ARCH\"\]#g" setup.py && \
+    FORCE_BUILD=true GPU_ARCHS=$ROCM_ARCH python3 -m pip install -v . && \
     cd .. && \
     bash -c "rm -rf flash-attention-v2 /tmp/* /var/tmp/* /root/* /root/.[^.]*"
 

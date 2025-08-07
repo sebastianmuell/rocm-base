@@ -22,6 +22,7 @@ build_latest:
   script:
     - |
       docker pull $CI_REGISTRY_IMAGE:source || true \
+      docker pull $CI_REGISTRY_IMAGE:latest || true \
       docker pull "$(cat Dockerfile |egrep -I '^FROM' |cut -d' ' -f2)" \
       docker tag "$(cat Dockerfile |egrep -I '^FROM' |cut -d' ' -f2)" $CI_REGISTRY_IMAGE:source \
       docker push $CI_REGISTRY_IMAGE:source
@@ -29,10 +30,7 @@ build_latest:
       docker build --pull \
       --build-arg BUILDKIT_INLINE_CACHE=1 --output=type=image,compression=zstd \
       --cache-from $CI_REGISTRY_IMAGE:source --cache-from $CI_REGISTRY_IMAGE:latest \
-      -t $CI_PROJECT_NAME:$CI_COMMIT_SHA \
-      -t $CI_PROJECT_NAME:latest \
-      -t $CI_PROJECT_NAME:${CI_COMMIT_SHORT_SHA} \
       -t $CI_REGISTRY_IMAGE:${CI_PIPELINE_CREATED_AT//:/.} .
     - docker tag $CI_REGISTRY_IMAGE:${CI_PIPELINE_CREATED_AT//:/.} $CI_REGISTRY_IMAGE:latest
-    - docker push -a $CI_REGISTRY_IMAGE
+    - docker push $CI_REGISTRY_IMAGE:${CI_PIPELINE_CREATED_AT//:/.}
     - docker push $CI_REGISTRY_IMAGE:latest
