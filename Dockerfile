@@ -3,16 +3,19 @@ FROM rocm/dev-ubuntu-24.04:latest
 
 # Set env vars
 ENV DEBIAN_FRONTEND=noninteractive
-ENV CC=clang
-ENV CXX=clang++
+ENV CC=amdclang
+ENV CXX=amdclang++
 ENV PYVENV=/usr/local/venv-pytorch
 ENV PATH="/opt/rocm/llvm/bin:/opt/rocm/bin:$PYVENV/bin:$PATH"
+ARG PARALLEL=8
 
-# Set GPU specific env vars, preset RDNA 3.5 gfx1150 / gfx1151
+# Set GPU specific env vars, preset RDNA 3.5 gfx1150
 # adjust as needed, list of GPUs supported by rocblas: https://github.com/ROCm/rocBLAS/blob/develop/library/src/handle.cpp#L81
-ENV ROCM_ARCH=gfx1151
-ENV HSA_OVERRIDE_GFX_VERSION=11.5.1
+ENV ROCM_ARCH=gfx1150
+ENV PYTORCH_ROCM_ARCH=gfx1150
+ENV HSA_OVERRIDE_GFX_VERSION=11.5.0
 ENV FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
+ENV FLASH_ATTENTION_TRITON_AMD_AUTOTUNE=TRUE
 ENV TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1
 
 # Set workdir
@@ -46,7 +49,10 @@ RUN apt-get update -qqy && apt-get dist-upgrade -qqy && apt-get install -qqy \
     libboost-system-dev \
     libboost-filesystem-dev \
     libglib2.0-0 \
+    libhsakmt-dev \
+    libhsa-runtime-dev \
     libjpeg-dev \
+    libmsgpack-dev \
     libomp-dev \
     libopenblas-dev \
     libopenmpi-dev \
@@ -62,7 +68,6 @@ RUN apt-get update -qqy && apt-get dist-upgrade -qqy && apt-get install -qqy \
     mesa-common-dev \
     migraphx \
     miopen-hip-dev \
-    miopen-hip-gfx1*kdb \
     patchelf \
     protobuf-compiler \
     python3 \
@@ -81,6 +86,7 @@ RUN apt-get update -qqy && apt-get dist-upgrade -qqy && apt-get install -qqy \
     rocm-hip-runtime \
     rocm-hip-runtime-dev \
     rocm-hip-sdk \
+    rocm-llvm-dev \
     rocm-opencl \
     rocm-opencl-dev \
     rocm-opencl-runtime \
@@ -101,35 +107,63 @@ RUN apt-get update -qqy && apt-get dist-upgrade -qqy && apt-get install -qqy \
     rsync \
     software-properties-common \
     subversion \
-    sudo \
     wget \
     && \
     apt-get clean && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* && \
-    ln -s /opt/rocm-*/ /opt/rocm && \
+    test -d /opt/rocm || ln -s /opt/rocm-* /opt/rocm && \
     git config --global user.email "gitlab@gitlab.local" && \
     git config --global user.name "gitlab bot"
 
-# Set up venv & pytorch
-RUN mkdir -p $PYVENV && python3 -m venv $PYVENV && \
-    python3 -m pip install -U pip wheel setuptools --no-cache-dir && \
-    python3 -m pip install -U asyncio ninja numpy==1.* numba onnx pybind11[global] pytest scipy tabulate transformers triton --no-cache-dir && \
-    # Install nightly pytorch \
-    python3 -m pip install -U --pre torch torchvision torchaudio numpy==1.* --index-url https://download.pytorch.org/whl/nightly/rocm"$(cat /opt/rocm/.info/version-dev | cut -d. -f1-2)"/ --no-cache-dir && \
-    cp -n /opt/rocm/lib/rocblas/library/*$ROCM_ARCH* $PYVENV/lib/python3*/site-packages/torch/lib/rocblas/library/ && \
-    # Install onnxruntime-rocm \
-    python3 -m pip install -U onnxruntime-rocm triton numpy==1.* -f https://repo.radeon.com/rocm/manylinux/rocm-rel-"$(cat /opt/rocm/.info/version-dev | cut -d- -f1)"/ --no-cache-dir \
-    || python3 -m pip install -U onnxruntime-rocm triton numpy==1.* -f https://repo.radeon.com/rocm/manylinux/rocm-rel-"$(cat /opt/rocm/.info/version-dev | cut -d. -f1-2)"/ --no-cache-dir && \
-    bash -c "rm -rf /tmp/* /var/tmp/* /root/* /root/.[^.]*"
+# Install rocblas from source
+RUN <<'EOD'
+set -eux
+git clone --single-branch --depth=1 https://github.com/ROCm/rocm-libraries.git -b "release/rocm-rel-$(cat /opt/rocm/.info/version | cut -d. -f1-2)" /tmp/rocmlibs
+cd /tmp/rocmlibs/projects/rocblas/
+# Rewrite version to match installed, avoiding apt dependency issues
+INSTALLED=$(apt-cache policy rocblas | awk '/Installed:/ {print $2}')
+VERSION_BASE=$(echo $INSTALLED | cut -d- -f1)
+VERSION_PATCH=$(echo $VERSION_BASE | cut -d. -f3-4)
+VERSION_TWEAK=$(echo $INSTALLED | cut -d- -f2)
+cat > update_version.sed << EOF
+/^set ( VERSION_STRING "\(.*\)" )/ {
+    c\\
+set ( VERSION_STRING "$VERSION_BASE" )\\
+rocm_setup_version( VERSION \\\${VERSION_STRING} NO_GIT_TAG_VERSION )\\
+set (PROJECT_VERSION_PATCH "$VERSION_PATCH")\\
+set (\\\${PROJECT_NAME}_VERSION_PATCH "$VERSION_PATCH")\\
+set (PROJECT_VERSION_TWEAK "$VERSION_TWEAK")\\
+set (\\\${PROJECT_NAME}_VERSION_TWEAK "$VERSION_TWEAK")
+}
+/^rocm_setup_version( VERSION \\\${VERSION_STRING} )\$/d
+EOF
+sed -i -f update_version.sed CMakeLists.txt
+# Compile and install rocblas
+./install.sh -ida ${ROCM_ARCH} -j ${PARALLEL}
+# Mark rocblas as hold to avoid apt updates
+apt-mark hold rocblas rocblas-dev
+rm -rf /tmp/* /var/tmp/*
+EOD
 
-# Install rocm flash attention v2
-RUN git clone https://github.com/ROCm/flash-attention.git flash-attention-v2 && \
-    cd flash-attention-v2 && git checkout main_perf && git submodule update --init --recursive && \
-    sed -i "s#versionstr\.decode(\*SUBPROCESS_DECODE_ARGS)\.strip()\.split(\x27\.\x27)#versionstr\.decode(\*SUBPROCESS_DECODE_ARGS)\.strip()\.split(\x27\.\x27)\n            version = re\.sub(\x27git\x27,\x27\x27, version)#g" /usr/local/venv-pytorch/lib/python3.12/site-packages/torch/utils/cpp_extension.py && \
+# Set up python venv
+RUN mkdir -p $PYVENV && python3 -m venv $PYVENV && \
+    # Install prerequisites
+    python3 -m pip install -U pip wheel setuptools --no-cache-dir && \
+    python3 -m pip install -U asyncio coloredlogs einops flatbuffers jinja2 networkx ninja numpy==1.* numba onnx packaging pillow pybind11[global] pytest scipy sympy tabulate transformers --no-cache-dir && \
+    # Install packages \
+    python3 -m pip install -U --pre onnxruntime-migraphx torch torchvision torchaudio triton numpy==1.* -f https://repo.radeon.com/rocm/manylinux/rocm-rel-"$(cat /opt/rocm/.info/version | cut -d- -f1)"/ --index-url https://download.pytorch.org/whl/rocm"$(cat /opt/rocm/.info/version | cut -d. -f1-2)"/ --no-cache-dir \
+    ||  python3 -m pip install -U --pre onnxruntime-migraphx torch torchvision torchaudio triton numpy==1.* -f https://repo.radeon.com/rocm/manylinux/rocm-rel-"$(cat /opt/rocm/.info/version | cut -d- -f1)"/ --index-url https://download.pytorch.org/whl/nightly/rocm"$(cat /opt/rocm/.info/version | cut -d. -f1-2)"/ --no-cache-dir \
+    ||  python3 -m pip install -U --pre onnxruntime-migraphx torch torchvision torchaudio triton numpy==1.* -f https://repo.radeon.com/rocm/manylinux/rocm-rel-"$(cat /opt/rocm/.info/version | cut -d. -f1-2)"/ --index-url https://download.pytorch.org/whl/nightly/rocm"$(cat /opt/rocm/.info/version | cut -d. -f1-2)"/ --no-cache-dir && \
+    ( test -d $PYVENV/lib/python3*/site-packages/torch/lib/rocblas/library/ && cp --update=none /opt/rocm/lib/rocblas/library/*$ROCM_ARCH* $PYVENV/lib/python3*/site-packages/torch/lib/rocblas/library/ ) || true && \
+    rm -rf /tmp/* /var/tmp/*
+
+# Install rocm flash attention
+RUN git clone --single-branch --depth=1 https://github.com/ROCm/flash-attention.git -b main_perf flash-attention && \
+    cd flash-attention && \
     sed -i "s#\"gfx942\"\]#\"gfx942\", \"$ROCM_ARCH\"\]#g" setup.py && \
-    FORCE_BUILD=true GPU_ARCHS=$ROCM_ARCH python3 -m pip install -v . && \
+    GPU_ARCHS=$ROCM_ARCH FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE python3 setup.py install && \
     cd .. && \
-    bash -c "rm -rf flash-attention-v2 /tmp/* /var/tmp/* /root/* /root/.[^.]*"
+    rm -rf flash-attention /tmp/* /var/tmp/*
 
 CMD ["/bin/bash"]
